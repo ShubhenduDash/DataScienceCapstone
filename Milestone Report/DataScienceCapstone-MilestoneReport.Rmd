@@ -1,0 +1,456 @@
+---
+title: "Data Science Capstone - Milestone Report"
+author: "Shubhendu Dash"
+date: "17/08/2020"
+output:
+  pdf_document: default
+  html_document: default
+  always_allow_html: true
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tibble)
+library(kableExtra)
+library(tm)
+library(RWeka)
+library(SnowballC)
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE, fig.align = "center")
+options(knitr.table.format = "html") 
+```
+
+## 1) Introduction
+
+The goal of this project is just to display that you've gotten used to working with the data and that you are on track to create your prediction algorithm. Please submit a report on [R Pubs](http://rpubs.com/) that explains your exploratory analysis and your goals for the eventual app and algorithm. This document should be concise and explain only the major features of the data you have identified and briefly summarize your plans for creating the prediction algorithm and Shiny app in a way that would be understandable to a non-data scientist manager. You should make use of tables and plots to illustrate important summaries of the data set. The motivation for this project is to: 
+1. Demonstrate that you've downloaded the data and have successfully loaded it in.
+2. Create a basic report of summary statistics about the data sets.
+3. Report any interesting findings that you amassed so far.
+4. Get feedback on your plans for creating a prediction algorithm and Shiny app.
+
+## 2) Dataset
+### 2.1) Description
+
+From the [course dataset information](https://www.coursera.org/learn/data-science-project/supplement/Iimbd/task-0-understanding-the-problem), the data comes from a corpus called ***HC Corpora*** (the original site is not reachable, but an archive of it can be seen at https://web-beta.archive.org/web/20160930083655/http://www.corpora.heliohost.org/aboutcorpus.html).  ***Corpora*** are collected from publicly available sources by a web crawler.
+
+As said before, the dataset can be downloaded from https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip, and consists, once being downloaded and uncompressed, of 4 folders corresponding to 4 different languages (German, English, Finnish, and Russian), and each folder containing 3 files from 3 different text sources (blogs, news, and Twitter):
+
+```{r message=FALSE}
+# Get the file list
+listOfFiles <- dir("HC Corpora", recursive = TRUE, full.names = TRUE)
+
+# Show the list as bullets
+kable(cbind(
+          seq(1, length(listOfFiles)), 
+          listOfFiles), 
+      col.names = c('#', 'File')) %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"), 
+          full_width = FALSE)
+```
+Next, a couple of sample lines of Twitter files are shown:
+
+ - ***de_DE.twitter.txt***:
+```{r}
+connnectionBlogsFile <- file("HC Corpora/de_DE/de_DE.twitter.txt", "r")
+readLines(connnectionBlogsFile, 3)
+close(connnectionBlogsFile)
+```
+ - ***en_US.twitter.txt***:
+```{r}
+connnectionBlogsFile <- file("HC Corpora/en_US/en_US.twitter.txt", "r")
+readLines(connnectionBlogsFile, 3)
+close(connnectionBlogsFile)
+```
+There exist special characters in the texts, for example, question marks. Due to that, they should be taken into account to be discarded in further cleaning data stages.
+ 
+### 2.2) Dataset details
+Our analysis starts with a summary table including, for each file in the bundle, file stats (size in bytes) and data derived from the execution of the ***wc*** command (i.e. lines and words counting, and words per line ratio):
+
+```{r message=FALSE}
+# Get the file stat list from each file
+listOfFileInfos <- data.frame(file = listOfFiles, size = file.info(listOfFiles)$size)
+listOfFileInfos$sizeInMB <- round(listOfFileInfos$size / (1024 * 1024), digits = 2)
+
+# Generate four new columns in order to be completed with 'wc' command execution data
+listOfFileInfos$lineCount <- 0
+listOfFileInfos$wordCount <- 0
+listOfFileInfos$wordsPerLineRatio <- 0
+
+# adding a column in order to show the file language
+listOfFileInfos <- listOfFileInfos %>%
+  rowwise() %>% 
+  mutate(language = 
+           ifelse(str_detect(file, "en_US"), 'English', 
+             ifelse(str_detect(file, "de_DE"), 'German',
+               ifelse(str_detect(file, "fi_FI"), 'Finnish',
+                 ifelse(str_detect(file, "ru_RU"), 'Russian', 'not-defined')))))
+
+# Auxiliary function. It allows get data from files using the 'wc' command.
+executeWc <- function(x) as.numeric(str_split(system(paste0("wc ", x), intern = TRUE),  boundary("word"))[[1]][1:2])
+
+# Complete de file stats with the 'wc' command data
+for (index in 1:nrow(listOfFileInfos)) {
+  wcCommandResults <- executeWc(listOfFileInfos[index,]$file)
+  
+  listOfFileInfos[index,]$lineCount <- wcCommandResults[1]
+  listOfFileInfos[index,]$wordCount <- wcCommandResults[2]
+  listOfFileInfos[index,]$wordsPerLineRatio <- round(wcCommandResults[2] / wcCommandResults[1], digits = 2)
+}
+
+columNamesToShow <- c('File', 'Size', 'Size in MB', 'Line count', 'Word count', 'W/L ratio', 'Language')
+
+# Show a formatted table
+kable(listOfFileInfos, col.names = columNamesToShow)  %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"), 
+          full_width = FALSE)
+
+```
+
+In the context of the Capstone project, only the English language files will be taken into account, that is:
+
+```{r results='asis'}
+# Select files in english language
+englishFiles <- listOfFileInfos[listOfFileInfos$language == "English",]
+
+# Show a formatted table
+kable(englishFiles, col.names = columNamesToShow)%>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"), 
+          full_width = FALSE)
+
+
+```
+From this standpoint, one sees that we are going to be dealing with around ***`r round(sum(englishFiles$sizeInMB))` MB*** of data. This data size could become into a very slow performance in processing the data. Because of that, a subset consisting of 1% of the original dataset can be used, as suggested in [***Task 1***](https://www.coursera.org/learn/data-science-project/supplement/IbTUL/task-1-getting-and-cleaning-the-data) of the course.
+
+### 2.2) Dataset cleaning
+Once the dataset and its details have been introduced, the following step is its cleaning. Firstly, total of text from the blog, Twitter and news files is loaded, considering the flag **skipNul = TRUE** for line reading in order to skip nulls, and the opening option 'rb' when reading ***en_US.news.txt*** so that the warning ***"incomplete final line found on ..."*** , as suggested from [course discussion forums](<https://www.coursera.org/learn/data-science-project/discussions/all/threads/ixryee4OEeW3AhKGdOu9ew/replies/6k05qu4dEeW3AhKGdOu9ew>). Finished the loading task, a sampling of 1% of the data is performed.
+
+```{r}
+
+tweets <- readLines('HC Corpora/en_US/en_US.twitter.txt', encoding = 'UTF-8', skipNul = TRUE)
+tweets <- iconv(tweets, to = "ASCII", sub="")
+
+blogs <- readLines('HC Corpora/en_US/en_US.blogs.txt', encoding = 'UTF-8', skipNul = TRUE)
+
+newsFileConnection <- file('HC Corpora/en_US/en_US.news.txt', encoding = 'UTF-8', open = 'rb')
+news <- readLines(newsFileConnection, skipNul = TRUE)
+close(newsFileConnection)
+
+sampledText <- c(
+  blogs[sample(1:length(blogs),length(blogs)/100)], 
+  news[sample(1:length(news),length(news)/100)], 
+  tweets[sample(1:length(tweets),length(tweets)/100)])
+remove(blogs)
+remove(tweets)
+remove(news)
+
+```
+This task resulted in an object of size ***`r as.character(round(object.size(sampledText) / (1024*1024)))` MB***, 
+meaningly lesser than the original set.
+Next, a corpus is created from the text already sampled, using the [***tm***](https://cran.r-project.org/web/packages/tm/index.html) pacakge, in order to take advantage of the text mining functionalities provided by that package.
+```{r build-corpus}
+
+sampledText <- iconv(sampledText, to = "ASCII", sub="")
+
+corpus <- VCorpus(VectorSource(sampledText))
+corpus
+
+# Utilitary function, for counting the words in a corpus.
+corpusWordCounter <- function(corpus) {
+  sum(sapply(corpus, str_count, pattern = "\\S+"))
+}
+
+originalWordCount <- corpusWordCounter(corpus)
+
+```
+The corpus has ***`r originalWordCount` words***  approximately.
+
+Following a sample of first 2 documents:
+```{r}
+writeLines(as.character(corpus[[1]]))
+writeLines(as.character(corpus[[2]]))
+```
+
+The cleaning consists of several transformation tasks, namely:
+
+* *Uniforming the text to lowercase*
+* *Removing punctuation, number, special characters, etc.*
+* *Striping whitespaces*
+* *Removing stop words*
+* *Profanity filtering (Removing swear words)*
+* *Stemming the text*
+
+Many of these task are performed using ***tm*** transformation operations, the rest of them need certain custom coding, usign the function ***content_transformer()*** from ***tm*** package. The transformations provided by ***tm*** package are:
+```{r}
+getTransformations()
+```
+
+#### 2.2.1) Uniforming the text to lowercase
+This transformation converts the whole corpus text to lowercase, using the ***tolower()*** transformation. Next, the sample of first 2 documents is shown again:
+```{r uniformimng_tolower}
+corpus <- tm_map(corpus, content_transformer(tolower))
+
+writeLines(as.character(corpus[[1]]))
+writeLines(as.character(corpus[[2]]))
+```
+
+#### 2.2.2) Removing punctuation, number, special characters, etc.
+In this step, for removing punctuations and numbers, the operations used are ***removePunctuation()*** and ***removeNumbers()***
+For special characters and character sequences (e.g URLs, email addresses, Twitter users and hashtags, etc.), the ***toSpace()*** function is used (borrowed from the [***Kailash Awati's article***](https://eight2late.wordpress.com/2015/05/27/a-gentle-introduction-to-text-mining-using-r/)).
+```{r removing_punctuation}
+
+# Utilitary function, borrowed from:
+#     https://eight2late.wordpress.com/2015/05/27/a-gentle-introduction-to-text-mining-using-r/
+toSpace <- content_transformer(function(x, pattern) {return (gsub(pattern, " ", x))})
+
+# To split words with "-" and ":", borrowed from:
+#     https://eight2late.wordpress.com/2015/05/27/a-gentle-introduction-to-text-mining-using-r/
+corpus <- tm_map(corpus, toSpace, "-")
+corpus <- tm_map(corpus, toSpace, ":")
+
+# For non-standard puntuations, borrowed from:
+#     https://eight2late.wordpress.com/2015/05/27/a-gentle-introduction-to-text-mining-using-r/
+corpus <- tm_map(corpus, toSpace, "`")
+corpus <- tm_map(corpus, toSpace, "�")
+corpus <- tm_map(corpus, toSpace, " -")
+
+# Special single quotes
+corpus <- tm_map(corpus, toSpace, "[\x82\x91\x92]")
+
+# URIs
+corpus <- tm_map(corpus, toSpace, '(ftp|http|https)[^([:blank:]|\\"|<|&|#\n\r)]+')
+# Twitter users and hashtags
+corpus <- tm_map(corpus, toSpace, '(@|#)[^\\s]+')
+# Emails addresses
+corpus <- tm_map(corpus, toSpace, '^[[:alnum:].-_]+@[[:alnum:].-]+$')
+
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+
+writeLines(as.character(corpus[[1]]))
+writeLines(as.character(corpus[[2]]))
+
+```
+
+#### 2.2.3) Striping whitespaces
+In this transformation, multiple whitespaces are collapsed to a single blank. The operation is perfomed using the  ***stripWhitespace()*** transformation:
+```{r striping_whitespaces}
+
+corpus <- tm_map(corpus, stripWhitespace)
+
+writeLines(as.character(corpus[[1]]))
+writeLines(as.character(corpus[[2]]))
+
+```
+
+#### 2.2.4) Removing stop words
+In this case, stop words (for English language) are removed. The operation to be applied is the  ***stopwords()*** transformation:
+```{r}
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+
+writeLines(as.character(corpus[[1]]))
+writeLines(as.character(corpus[[2]]))
+```
+
+#### 2.2.5) Profanity filtering
+The capstone project aims to develop a word prediction app, and one is not interested in the prediction of swear words. Due to that, a profanity filtering task is necessary. Doing a little research on the Internet, one can find several offensive words lists to be used for filtering. The list chosen for this task is the provided in the article ["A list of 723 bad words to blacklist & how to use Facebook's moderation tool"](https://www.frontgatemedia.com/a-list-of-723-bad-words-to-blacklist-and-how-to-use-facebooks-moderation-tool/). The list can be downloaded from:
+<http://www.frontgatemedia.com/new/wp-content/uploads/2014/03/Terms-to-Block.csv>
+Next, a few sample of such list:
+```{r removing_swear_words}
+swearWordsFileUrl <- 'Terms-to-Block.csv'
+rawSwearWords <- readLines(swearWordsFileUrl)
+swearWords <- gsub(',"?', '', rawSwearWords[5:length(rawSwearWords)])
+
+sample(swearWords, 10)
+
+corpus <- tm_map(corpus, removeWords, swearWords)
+
+```
+
+#### 2.2.6) Stemming the text
+Stemming is the process of reducing inflected (or sometimes derived) words to their **word stem** or root, e.g. **working** and **worked** to **work**. Doing this task, words with same root can be reduced to their stem. This process can be performed using the operation ***stemDocument()***.
+```{r}
+
+corpus <- tm_map(corpus, stemDocument)
+
+lastTransformationWordCount <- corpusWordCounter(corpus)
+
+```
+Finally, the corpus has ***`r lastTransformationWordCount` words***, ***`r originalWordCount - lastTransformationWordCount`*** less than from the beginning.
+
+## 3) Analysis
+### 3.1) Exploratory Analysis
+This step starts with the creation of Document Term Matrices (DTM), which allows one can find the occurrences of words in he corpus, that is, which words/combinations present higher frequencies. For this, the ***DocumentTermMatrix()*** function from the ***tm*** package and N-Gram tokenizers from ***RWeka*** package are used. Specifically, three DTMs are build, for words(1-Grams), 2-Grams and 3-Grams. Built the DTMs, frequencies are calculated and sorted. As a result, different plots displaying the 10 most frequent words/combinations are shown.
+
+```{r dtm}
+
+# Tokenizers based on NLP package
+unigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 1))
+bigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+trigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 3, max = 3))
+
+# Utility function, for getting the top ten frequencies
+getNgramFrequencies <- function(dtm) {
+  sort(colSums(as.matrix(dtm)), decreasing = TRUE)
+}
+
+unigramDtm  <- DocumentTermMatrix(corpus, control = list(tokenize = unigramTokenizer))
+unigramDtm <- removeSparseTerms(unigramDtm, 0.999)
+unigramFrequencies <- getNgramFrequencies(unigramDtm)
+unigram10Frequencies <- unigramFrequencies[1:10]
+unigramFrequenciesDF <- data.frame(word = names(unigram10Frequencies), frequency = as.numeric(unigram10Frequencies))
+
+bigramDtm  <- DocumentTermMatrix(corpus, control = list(tokenize = bigramTokenizer))
+bigramDtm <- removeSparseTerms(bigramDtm, 0.999)
+bigramFrequencies <- getNgramFrequencies(bigramDtm)
+bigram10Frequencies <- bigramFrequencies[1:10]
+bigramFrequenciesDF <- data.frame(bigram = names(bigram10Frequencies), frequency = as.numeric(bigram10Frequencies))
+
+trigramDtm <- DocumentTermMatrix(corpus, control = list(tokenize = trigramTokenizer))
+trigramDtm <- removeSparseTerms(trigramDtm, 0.9999)
+trigramFrequencies <- getNgramFrequencies(trigramDtm)
+trigram10Frequencies <- trigramFrequencies[1:10]
+trigramFrequenciesDF <- data.frame(trigram = names(trigram10Frequencies), frequency = as.numeric(trigram10Frequencies))
+
+```
+
+- ***For words***:
+```{r unigrams-details}
+
+kable(unigramFrequenciesDF, col.names = c('Word', 'Frequency'))  %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"), 
+    full_width = FALSE)
+
+ggplot(data = unigramFrequenciesDF, aes(reorder(word, -frequency), frequency)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Most frequent words") +
+  xlab("Words") + ylab("Frequency") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+- ***For 2-Grams***:
+```{r bigrams-details}
+
+kable(bigramFrequenciesDF, col.names = c('2-Gram', 'Frequency'))  %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"), 
+    full_width = FALSE)
+
+ggplot(data = bigramFrequenciesDF, aes(reorder(bigram, -frequency), frequency)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Most frequent 2-Grams") +
+  xlab("2-Grams") + ylab("Frequency") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+- ***For 3-Grams***:
+```{r trigrams-details}
+
+kable(trigramFrequenciesDF, col.names = c('Word', 'Frequency'))  %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"), 
+    full_width = FALSE)
+
+ggplot(data = trigramFrequenciesDF, aes(reorder(trigram, -frequency), frequency)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Most frequent 3-Grams") +
+  xlab("3-Grams") + ylab("Frequency") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Next, the follwing questions from the [***Task 2***](https://www.coursera.org/learn/data-science-project/supplement/BePVz/task-2-exploratory-data-analysis) are answered:
+
+* *How many unique words do you need in a frequency sorted dictionary to cover 50% of all word instances in the language? 90%?* 
+
+Taking the advantage of already having the word frequencies (descending ordered), we can iterate over them and get the total amount of unique words and word instances:
+
+*Word instances:*
+```{r}
+totalOfWordInstances <- sum(unigramFrequencies)
+
+totalOfWordInstances
+```
+
+*Unique words:*
+```{r}
+totalOfUniqueWords <- length(unigramFrequencies)
+
+totalOfUniqueWords
+
+# Utilitary function. Calculate the amount of unique words for a selected coverage level
+findAmountWordsForCoverage <- function(descendingFrequencies, coverage) {
+  
+  totalOfWordInstances <- sum(descendingFrequencies)
+  totalOfUniqueWords <- length(descendingFrequencies)
+
+  coveragePercentage <- totalOfWordInstances * (coverage  / 100)
+  accumulatedWords <- 0
+  lastIndex <- 0
+  
+  for (index in seq_len(totalOfUniqueWords)) { 
+    accumulatedWords <- accumulatedWords + descendingFrequencies[[index]]
+    lastIndex <- index
+    
+    if (accumulatedWords >= coveragePercentage) break 
+  }
+
+  lastIndex
+}
+
+```
+
+With this data, the amount of unique words for a coverge of 50% is ***`r findAmountWordsForCoverage(unigramFrequencies, 50)`***, and for 90% is ***`r findAmountWordsForCoverage(unigramFrequencies, 90)`***.
+
+* *How do you evaluate how many of the words come from foreign languages?*
+
+The English language does not use special letters or accents (no more than the ASCII characters), and this feature can get a way to detect non-english words. It can be achieved trying to detect words containing accents/umlauts(e.g. ***�***, ***�***) or non-english letter (e.g. ***�*** or Slavic letters), taking into account that these letters can be found in the character encoding ***ISO/IEC 8859-1*** (also known as Latin-1), and a special tag can be set when a special letter is detected. Next, an example of it can be done:
+```{r non-english-words, echo=TRUE}
+
+# Return a data frame with 2 column, word and valid (TRUE for words in English, FALSE otherwise)
+detectNonEnglishWords <- function(line) {
+  
+  convertWord <- function(word) iconv(word, 'ISO8859-1', 'ASCII', sub = '<NON_ENGLISH_LETTER>')
+  
+  isNotConvertedWord <- function(word) !str_detect(convertWord(word), '<NON_ENGLISH_LETTER>')
+  
+  wordsInLine <- str_split(line, boundary("word"))[[1]]
+  wordsDF <- data.frame(word = wordsInLine)
+  wordsDF <- wordsDF %>% 
+    rowwise() %>% 
+    mutate(valid = isNotConvertedWord(word))
+  
+  wordsDF
+}
+```
+An example applying text ***'The Fu�ball is the King of Sports'*** (using ***Fu�ball*** in German instead of ***Football*** in English)
+```{r non-english-words-2, echo=TRUE}
+originalText <- 'The Fu�ball is the King of Sports'
+originalText
+
+detectNonEnglishWords('The Fu�ball is the King of Sports')
+```
+This function can be used for removing non-english words as well:
+```{r non-english-words-3, echo=TRUE}
+
+# Remove non-english words from a line of text
+removeNonEnglishWords <- function(line) {
+  wordsDF <- detectNonEnglishWords(line)
+  filteredLine <- paste(wordsDF[wordsDF$valid == TRUE, 'word']$word, collapse = " ")
+  filteredLine
+}
+
+originalText <- 'The Fu�ball is the King of Sports'
+originalText
+
+removeNonEnglishWords('The Fu�ball is the King of Sports')
+```
+
+
+### 3.2) Further steps
+The next steps of the project will be to build a predictive algorithm using N-Grams lookups, in order to compute probabilites for the next occurence regarding to the previous words, backing off to a lower level (e.g. from 3-gram to 2-gram, and so forth) as needed. Later, developing a web app (using [***Shiny***](https://shiny.rstudio.com/)) that uses such algorithm, suggesting to the user the next word.
+
+## Appendix I - Source codes
+
+This document has been generated using [***R Mardown***](http://rmarkdown.rstudio.com/). Its ***.Rmd*** source code that can be found at: <https://github.com/ShubhenduDash/DataScienceCapstone>.
